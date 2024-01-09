@@ -1,0 +1,218 @@
+# 1/ LMM model 
+# ---------------------------------
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(psycho)
+library(lattice)
+library(effects)
+library(emmeans)
+library(mice)
+library(ggplot2)
+library(gridExtra)
+library(CorrMixed)
+
+#Data inladen
+#//////////////////
+TE <- read_excel('Synthese_VolumesMRI_TE.xlsx', sheet = 10)
+view(TE)
+TE$BaseVolume <- ave(TE$Volume, TE$Name, FUN = function(x) x[1])
+view(TE)
+TE <- TE[TE$TimePoint != 0,]
+
+# log tranformation for normalized data
+TE$BaseLog <- log(TE$BaseVolume)
+TE$VolumeLog<- log(TE$Volume)
+
+# creating factors:
+TE <- TE %>%
+  mutate(Group = factor(Group))%>%
+  mutate(Series = factor(Series)) %>%
+  mutate(TimePoint = factor(TimePoint)) %>%
+  mutate(Name = factor(Name))
+
+# timepoint 15 - create a knot
+TE$TimeKnot15 <- TE$Time - 15
+TE$TimeKnot15[TE$TimeKnot15 < 0] <- 0
+
+# LMM model
+linmod <- lmer(VolumeLog ~  BaseLog + Time + Group + Time:Group + TimeKnot15 +TimeKnot15*Group + (1|Name), 
+               data = TE)   # aic = 142
+summary(linmod)
+
+TE$TimeKnotMin15 <- TE$Time-15  
+TE$TimeKnotMin15[TE$TimeKnotMin15 > 0] <- 0
+
+for(i in 1:4){
+  
+m1 <- lmer(VolumeLog ~  BaseLog + Time + relevel(Group, ref=i) + Time:relevel(Group, ref=i) + 
+             TimeKnot15 +TimeKnot15*relevel(Group, ref=i) + (1|Name), 
+           data = TE)
+CI <- round((exp(confint(m1)['Time',])-1)*100,2)
+print(paste('estimated mean volume increase per day until day 15 for group', i,' = ', 
+      round((exp(fixef(m1)['Time'])-1)*100, 2), '%, 95% BI for group', i,' = ', CI[1], '-', CI[2], '%'))
+
+if(i!=2){
+m2 <- lmer(VolumeLog ~  BaseLog + Time + relevel(Group, ref=i) + Time:relevel(Group, ref=i) + 
+             TimeKnotMin15 +TimeKnotMin15*relevel(Group, ref=i) + (1|Name), 
+           data = TE)
+CI <- round((exp(confint(m2)['Time',])-1)*100,2)
+print(paste('estimated mean volume increase per day from day 15 onwards for group', i,' = ', 
+      round((exp(fixef(m2)['Time'])-1)*100, 2), '%, 95% BI for group', i,' = ', CI[1], '-', CI[2], '%'))
+}}
+
+# plotting data:
+library(RColorBrewer)
+kleur <- brewer.pal(4,'Set2')
+TE2 <- TE
+view(TE2)
+TE2$BaseLog <- mean(TE$BaseLog[TE$Time == 3], na.rm = T) # gemiddelde van alle dieren, na.rm : ontbrekende waarden te negeren
+TE2$predictVol <- predict(linmod, re.form = NA, newdata = TE2)
+TE2 <- TE2[order(TE2$predictVol),]
+
+jpeg(filename = 'LMMPlot.jpg', width = 1600, height = 1200, res = 300)
+par(mar = c(4.6, 4.1, 1.1, 1.1))
+plot(x=TE2$Time[TE2$Group ==1], y=exp(TE2$predictVol[TE2$Group ==1]), bty = 'n', lty = 1, 
+     ylab = 'Predicted volume (mm³)', xlab = 'Time (days)', las = 1, type = 'l'
+     , col = kleur[1], lwd = 2, xaxt = 'n', xlim = c(3,30), ylim = c(20 , 500),log='y')
+axis(side = 1, at = c(3,6,9,12,15,18,21,24, 27, 30))
+lines(x=TE2$Time[TE2$Group ==2], y=exp(TE2$predictVol[TE2$Group ==2]), lwd = 2, col = kleur[2], lty = 4)
+lines(x=TE2$Time[TE2$Group ==3], y=exp(TE2$predictVol[TE2$Group ==3]), lwd = 2, col = kleur[3], lty = 4)
+lines(x=TE2$Time[TE2$Group ==4], y=exp(TE2$predictVol[TE2$Group ==4]), lwd = 2, col = kleur[4], lty = 4)
+legend(x=3, y=500, legend = c('Control', 'TMZ', 'RT', 'ST'), lty = c(1,4,4,4), lwd = 2, col = kleur, bty = 'n', title = 'Treatment groups')
+
+# 2/ Survival analysis
+#-------------------------------------
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(survival)
+library(ggplot2)
+library(ggpubr) # publication ready plots in ggplot
+library(ggfortify) # om survival plots te plotten ook
+library(survminer) # visualizing and analyzing survival analysis results
+library(cowplot) # survival analysis and visualization
+
+# data:
+TE <- read_excel('Synthese_VolumesMRI_TE.xlsx', sheet = 6)
+view(TE)
+
+# Kaplan Meijer
+surv_time <- TE %>%     
+  group_by(Name, Group) %>%
+  summarize(survt = max(TimePoint),
+            Volume = Volume[which.max(TimePoint)])
+
+m <- surv_time %>%
+  group_by(Group)%>%
+  summarize(median = median(survt))
+
+surv_time$status <- 1 
+Y <- Surv(time = surv_time$survt, event = surv_time$status)
+
+kmfit <- survfit(Y ~ surv_time$Group)
+summary(kmfit)
+
+library(RColorBrewer)
+kleur <- brewer.pal(4,'Set2')
+
+jpeg(filename = 'TE_Survival.jpg', width = 4000, height = 2000, res = 300)
+
+surv_plot2 <- ggsurvplot(kmfit, data = surv_time, pval = F, conf.int = T, risk.table = T, 
+                         tables.theme = theme_cleantable(),
+                         palette = kleur,
+                         legend.title='Treatment groups: ', 
+                         font.main = c(18, "bold", "darkred"),
+                         font.x = c(14, "bold", "darkred"),
+                         font.y = c(14, "bold", "darkred"), 
+                         legend.labs = c('Control (ST)', 'Tonabersat + TMZ', 'Tonabersat + RT', 'Tonabersat + ST'), 
+                         break.time.by = 3, xlab='Survival time (days)', 
+                         surv.scale= 'percent',
+                         title = "Overall survival: adjuvant effect of Tonabersat")
+surv_plot2$plot <- surv_plot2$plot +
+  annotate('text', x = 14, y = 0.90, label = 'Reference', size=5)+
+  annotate('text', x = 10.5, y = 0.72, label = 'p = 0,010', size=5)+
+  annotate('text', x = 22.5, y = 0.90, label = 'p = 0,097', size=5)+
+  annotate('text', x = 25.5, y = 0.62, label = 'p = 0,028', size=5)+
+  theme(plot.title = element_text(hjust = 0.5))
+
+surv_plot2
+
+
+a <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(1, 2))) # log rank test
+A <- pchisq(a$chisq, length(a$n)-1, lower.tail = F) # p waarde uithalen uit de test met chi squared test
+G_A <- 'Controle_VS_TMZ'
+b <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(1, 3)))
+B <- pchisq(b$chisq, length(b$n)-1, lower.tail = FALSE)
+G_B <- 'Controle_VS_RT'
+c <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(1, 4)))
+C <- pchisq(c$chisq, length(c$n)-1, lower.tail = FALSE)
+G_C <- 'Controle_VS_ST'
+d <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(2, 3)))
+D <- pchisq(d$chisq, length(d$n)-1, lower.tail = FALSE)
+G_D <- 'TMZ_VS_RT'
+e <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(2, 4)))
+E <- pchisq(e$chisq, length(e$n)-1, lower.tail = FALSE)
+G_E <- 'TMZ_VS_ST'
+g <- survdiff(Y~Group, data = surv_time, subset = (Group %in% c(3, 4)))
+G <- pchisq(g$chisq, length(g$n)-1, lower.tail = FALSE)
+G_G <- 'RT_VS_ST'
+
+p_values <- c(A,B,C,D,E,G)
+p_values_Holm <- p.adjust(p_values, method = c('holm'), n = length(p_values))
+G_Namen <- c(G_A,G_B,G_C,G_D,G_E,G_G)
+P_values_Surv <- as.data.frame(p_values_Holm, G_Namen)
+
+p_values <- c(A,B,C,D,E,G)
+p_values_Holm <- p.adjust(p_values, method = c('holm'), n = length(p_values))
+G_Namen <- c(G_A,G_B,G_C,G_D,G_E,G_G)
+P_values_Surv <- as.data.frame(p_values_Holm, G_Namen)
+
+# 3/ Behavior
+# -------------------------------
+library(grid)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+
+HE <- rep(c( 'Weight loss (20%)','Balance problems/Hunchback',
+            'Reduced activity','Loss of grooming','MRI pathology (tumor > 8mm)',
+            'Epileptic seizures','Aggression','Spread via ventricle'),4)
+
+Groups <- c(rep('ST Control',8),rep('Tonabersat + TMZ',8), rep('Tonabersat + RT',8), rep('Tonabersat + ST',8))
+
+ST <- c(2,	5,	7,	7,	4,	1,	1,	4) # ST controle
+TTMZ <- c(	1,	2,	4,	4,	5,	1,	0,	0) # Tonabersat + TMZ
+TRT <- c(	0,	1,	4,	6,	6,	1,	0,	0) # Tonabersat + RT
+TST <- c(	0,	1,	4,	4,	6,	0,	0,	0) # Tonabersat + ST
+
+Animals <- c(ST, TTMZ,TRT,TST)
+data <- data.frame(
+  HE = HE,
+  Groups = factor(Groups),
+  Animals = as.numeric(Animals))
+
+library(RColorBrewer)
+kleur <- brewer.pal(4,'Set2')
+display.brewer.pal(n = 4, name = 'Set2') # kleuren bekijken
+codes <- brewer.pal(n = 4, name = "Set2") # codes weergeven
+colors <- c("#66C2A5","#8DA0CB",'#E78AC3',"#FC8D62")
+
+jpeg(filename = 'TE_HE.jpg', width = 4000, height = 2000, res = 300)
+
+plot <- ggplot(data, aes(fill=Groups, y=Animals, x=reorder(HE, +Animals), label = Animals)) + 
+  geom_bar(position="stack", stat="identity")+
+  ggtitle("Symptoms of the F98 GB model per treatment group")+
+  xlab("")+
+  ylab('Number of animals')+
+  theme_pubclean()+
+  theme(plot.title = element_text(hjust = 0.5, size = 20))+
+  geom_text(data=subset(data,Animals != 0), position = position_stack(vjust = 0.5), size = 4, color = "#ffffff")+
+  scale_fill_manual(values = colors, name = 'Treatment Groups:', labels = c('Control (ST) (n=7)', 'Tonabersat + RT (n=7)', 'Tonabersat + ST (n=7)', 'Tonabersat + TMZ (n=6)'))+
+  scale_color_identity()+
+  theme(text = element_text(size = 15))+
+  coord_flip()
+
+plot
